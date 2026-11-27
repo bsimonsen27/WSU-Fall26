@@ -11,7 +11,6 @@ import time
 
 def main():
     im_spillway = imageio.v2.imread("spillway-dark.tif")
-    # im_alley = imageio.v2.imread("header-greyscale.png")
     im_crowd = imageio.v2.imread("crowd.tif")
     im_lax = imageio.v2.imread("lax.tif")
     im_peppers = imageio.v2.imread("peppers.tif")
@@ -20,7 +19,6 @@ def main():
     
     # test all images
     run_it(im_spillway, "Spillway")
-    # run_it(im_alley,"Alley")
     run_it(im_crowd, "Crowd")
     run_it(im_lax, "LAX")
     run_it(im_peppers, "Peppers")
@@ -318,6 +316,7 @@ def contrast_limited_ahe(im, divisions=1, clip_limit=2.0):
     # create lookup table for each tile
     luts = np.zeros((n_tiles, n_tiles, nbins), dtype=np.uint8)
 
+    # iterate through tiles
     for i in range(n_tiles):
         for j in range(n_tiles):
 
@@ -428,8 +427,11 @@ def clip_histogram(hist, clip_limit):
 
 
 
+
 def adaptive_histogram_interpolated(im, division_num=1):
+
     M, N = im.shape
+    nbins = 256
 
     # Determine number of tiles
     n_tiles = 2**division_num
@@ -439,14 +441,16 @@ def adaptive_histogram_interpolated(im, division_num=1):
     col_bounds = np.linspace(0, N, n_tiles + 1, dtype=int)
 
     # Store the transformation lookup table for each tile
-    transformations = np.zeros((n_tiles, n_tiles, 256))
+    transformations = np.zeros((n_tiles, n_tiles, nbins))
 
     # Calculate the HE transformation for every tile
     for i in range(n_tiles):
         for j in range(n_tiles):
+
             tile = im[row_bounds[i]:row_bounds[i+1],
                       col_bounds[j]:col_bounds[j+1]]
 
+            # Calculate histogram and CDF
             hist = image_histogram(tile)
             cdf = np.cumsum(hist)
 
@@ -455,70 +459,64 @@ def adaptive_histogram_interpolated(im, division_num=1):
 
             # Calculate transformation
             if np.all(tile == tile.flat[0]):
-                transformations[i, j] = np.arange(256)
+                transformations[i, j] = np.arange(nbins)
             else:
                 transformations[i, j] = np.round(
                     (cdf - cdf_min) / (1 - cdf_min) * 255
                 )
 
-    # Initialize output image
-    im_out = np.zeros_like(im, dtype=np.uint8)
-
     # Calculate the center of each tile
     row_centers = (row_bounds[:-1] + row_bounds[1:] - 1) / 2
     col_centers = (col_bounds[:-1] + col_bounds[1:] - 1) / 2
 
-    # Process each pixel
-    for y in range(M):
-        for x in range(N):
+    # Generate pixel coordinates
+    y = np.arange(M)
+    x = np.arange(N)
 
-            # Find the two neighboring tile centers vertically
-            r1 = np.searchsorted(row_centers, y, side='right') - 1
-            r1 = np.clip(r1, 0, n_tiles - 1)
-            r2 = min(r1 + 1, n_tiles - 1)
+    # Find neighboring tile indices
+    y1 = np.clip(np.searchsorted(row_centers, y), 0, n_tiles-1)
+    x1 = np.clip(np.searchsorted(col_centers, x), 0, n_tiles-1)
 
-            # Find the two neighboring tile centers horizontally
-            c1 = np.searchsorted(col_centers, x, side='right') - 1
-            c1 = np.clip(c1, 0, n_tiles - 1)
-            c2 = min(c1 + 1, n_tiles - 1)
+    y0 = np.maximum(y1 - 1, 0)
+    x0 = np.maximum(x1 - 1, 0)
 
-            # Calculate interpolation weights
-            if r1 == r2:
-                wy = 0
-            else:
-                wy = (y - row_centers[r1]) / (
-                    row_centers[r2] - row_centers[r1]
-                )
+    # Calculate interpolation weights
+    wy = np.divide(
+        y - row_centers[y0],
+        row_centers[y1] - row_centers[y0],
+        out=np.zeros(M, dtype=float),
+        where=(y1 != y0)
+    )
 
-            if c1 == c2:
-                wx = 0
-            else:
-                wx = (x - col_centers[c1]) / (
-                    col_centers[c2] - col_centers[c1]
-                )
+    wx = np.divide(
+        x - col_centers[x0],
+        col_centers[x1] - col_centers[x0],
+        out=np.zeros(N, dtype=float),
+        where=(x1 != x0)
+    )
 
-            # Keep weights within [0, 1]
-            wy = np.clip(wy, 0, 1)
-            wx = np.clip(wx, 0, 1)
+    # Keep weights within [0, 1]
+    wy = np.clip(wy, 0, 1)
+    wx = np.clip(wx, 0, 1)
 
-            # Original pixel intensity
-            pixel = im[y, x]
+    # Get equalized values from neighboring tiles
+    im_uint = im.astype(np.uint8)
 
-            # Apply the four neighboring transformations
-            T11 = transformations[r1, c1, pixel]
-            T12 = transformations[r1, c2, pixel]
-            T21 = transformations[r2, c1, pixel]
-            T22 = transformations[r2, c2, pixel]
+    T00 = transformations[y0[:, None], x0[None, :], im_uint]
+    T01 = transformations[y0[:, None], x1[None, :], im_uint]
+    T10 = transformations[y1[:, None], x0[None, :], im_uint]
+    T11 = transformations[y1[:, None], x1[None, :], im_uint]
 
-            # Bilinear interpolation
-            top = (1 - wx) * T11 + wx * T12
-            bottom = (1 - wx) * T21 + wx * T22
+    # Bilinear interpolation
+    eq_im = (
+        T00 * (1 - wy[:, None]) * (1 - wx[None, :]) +
+        T01 * (1 - wy[:, None]) * wx[None, :] +
+        T10 * wy[:, None] * (1 - wx[None, :]) +
+        T11 * wy[:, None] * wx[None, :]
+    )
 
-            result = (1 - wy) * top + wy * bottom
+    return np.clip(np.round(eq_im), 0, 255).astype(np.uint8)
 
-            im_out[y, x] = np.clip(np.round(result), 0, 255)
-
-    return im_out
 
 
 def adaptive_histogram(im, division_num=1):
